@@ -6,6 +6,7 @@ import os
 import websockets
 from loguru import logger
 from modules.XianyuApis import XianyuApis
+from modules.XianyuAgent import XianyuReplyBot
 
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
@@ -14,6 +15,7 @@ from services.context_manager import ChatContextManager
 class XianyuLive:
     def __init__(self, cookies_str):
         self.xianyu = XianyuApis()
+        self.bot = XianyuReplyBot()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
         self.cookies_str = cookies_str
         self.cookies = trans_cookies(cookies_str)
@@ -426,14 +428,14 @@ class XianyuLive:
             # 获取完整的对话上下文
             context = self.context_manager.get_context_by_chat(chat_id)
             # 生成回复
-            bot_reply = bot.generate_reply(
+            bot_reply = self.bot.generate_reply(
                 send_message,
                 item_description,
                 context=context
             )
             
             # 检查是否为价格意图，如果是则增加议价次数
-            if bot.last_intent == "price":
+            if self.bot.last_intent == "price":
                 self.context_manager.increment_bargain_count_by_chat(chat_id)
                 bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
                 logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")

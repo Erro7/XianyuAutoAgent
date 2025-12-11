@@ -29,7 +29,6 @@ def run():
     
     logger.info(f"cookies：{cookies_str}")
     
-    bot = XianyuReplyBot()
     xianyuLive = XianyuLive(cookies_str)
     # 常驻进程
     asyncio.run(xianyuLive.main())
