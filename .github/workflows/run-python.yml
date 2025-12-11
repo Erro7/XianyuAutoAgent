@@ -11,18 +11,9 @@ on:
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - branch: main
-            environment: production
-          - branch: staging
-            environment: staging
-          - branch: develop
-            environment: development
     
-    # 根据分支设置不同的环境
-    environment: ${{ matrix.environment }}
+    # 根据推送的分支设置不同的环境
+    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'develop' && 'development' || github.ref_name }}
     
     steps:
       - name: Checkout code
