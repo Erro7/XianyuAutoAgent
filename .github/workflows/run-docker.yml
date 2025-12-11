@@ -1,0 +1,80 @@
+name: Docker Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    # 根据推送的分支设置不同的环境
+    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'develop' && 'development' || github.ref_name }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME || 'xianyu-bot' }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Clean environment variables
+        run: |
+          # 清理环境变量中的不可见字符
+          echo "CLEANED_API_KEY=$(echo "${{ secrets.API_KEY }}" | tr -d '\r\n')" >> $GITHUB_ENV
+          echo "CLEANED_COOKIES_STR=$(echo "${{ secrets.COOKIES_STR }}" | tr -d '\r\n')" >> $GITHUB_ENV
+          echo "CLEANED_MODEL_BASE_URL=$(echo "${{ vars.MODEL_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1' }}" | tr -d '\r\n')" >> $GITHUB_ENV
+          echo "CLEANED_MODEL_NAME=$(echo "${{ vars.MODEL_NAME || 'qwen-max' }}" | tr -d '\r\n')" >> $GITHUB_ENV
+          echo "CLEANED_TOGGLE_KEYWORDS=$(echo "${{ vars.TOGGLE_KEYWORDS || 'xxx' }}" | tr -d '\r\n')" >> $GITHUB_ENV
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            # 拉取最新的Docker镜像
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME || 'xianyu-bot' }}:${{ github.ref_name }}
+            
+            # 停止并删除旧容器（如果存在）
+            docker stop xianyu-bot-${{ github.ref_name }} 2>/dev/null || true
+            docker rm xianyu-bot-${{ github.ref_name }} 2>/dev/null || true
+            
+            # 运行新容器
+            docker run -d \
+              --name xianyu-bot-${{ github.ref_name }} \
+              --restart unless-stopped \
+              -e API_KEY="${{ env.CLEANED_API_KEY }}" \
+              -e COOKIES_STR="${{ env.CLEANED_COOKIES_STR }}" \
+              -e MODEL_BASE_URL="${{ env.CLEANED_MODEL_BASE_URL }}" \
+              -e MODEL_NAME="${{ env.CLEANED_MODEL_NAME }}" \
+              -e TOGGLE_KEYWORDS="${{ env.CLEANED_TOGGLE_KEYWORDS }}" \
+              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME || 'xianyu-bot' }}:${{ github.ref_name }}
