@@ -621,6 +621,9 @@ if __name__ == '__main__':
     logger.info(f"日志级别设置为: {log_level}")
     
     cookies_str = os.getenv("COOKIES_STR")
+    
+    logger.info(f"cookies 加载完成：{cookies_str}")
+    
     bot = XianyuReplyBot()
     xianyuLive = XianyuLive(cookies_str)
     # 常驻进程
