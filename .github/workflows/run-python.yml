@@ -24,16 +24,23 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      - name: Copy prompt files
+        run: |
+          cp prompts/classify_prompt_example.txt prompts/classify_prompt.txt
+          cp prompts/price_prompt_example.txt prompts/price_prompt.txt
+          cp prompts/tech_prompt_example.txt prompts/tech_prompt.txt
+          cp prompts/default_prompt_example.txt prompts/default_prompt.txt
+
       - name: Run Python script
         env:
           # 敏感变量从 Secrets 注入
           API_KEY: ${{ secrets.API_KEY }}
           COOKIES_STR: ${{ secrets.COOKIES_STR }}
 
-          # 非敏感变量直接写入（来自 .env.example）
+          # 非敏感变量直接写入
           MODEL_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
           MODEL_NAME: qwen-max
-          TOGGLE_KEYWORDS: xxx
+          TOGGLE_KEYWORDS: 。
 
         run: |
           python main.py
