@@ -4,12 +4,26 @@ on:
   push:
     branches:
       - main
+      - develop
+      - staging
   workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        include:
+          - branch: main
+            environment: production
+          - branch: staging
+            environment: staging
+          - branch: develop
+            environment: development
+    
+    # 根据分支设置不同的环境
+    environment: ${{ matrix.environment }}
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -33,14 +47,14 @@ jobs:
 
       - name: Run Python script
         env:
-          # 敏感变量从 Secrets 注入
+          # 敏感变量从环境配置中注入
           API_KEY: ${{ secrets.API_KEY }}
           COOKIES_STR: ${{ secrets.COOKIES_STR }}
 
-          # 非敏感变量直接写入
-          MODEL_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
-          MODEL_NAME: qwen-max
-          TOGGLE_KEYWORDS: xxx
+          # 非敏感变量根据环境设置不同值
+          MODEL_BASE_URL: ${{ vars.MODEL_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1' }}
+          MODEL_NAME: ${{ vars.MODEL_NAME || 'qwen-max' }}
+          TOGGLE_KEYWORDS: ${{ vars.TOGGLE_KEYWORDS || 'xxx' }}
 
         run: |
           python main.py
