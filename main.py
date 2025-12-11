@@ -622,7 +622,11 @@ if __name__ == '__main__':
     
     cookies_str = os.getenv("COOKIES_STR")
     
-    logger.info(f"cookies 加载完成：{cookies_str}")
+    if not cookies_str:
+        logger.error("cookies 未配置，请先配置.env文件中的COOKIES_STR")
+        exit(1)
+    
+    logger.info(f"cookies：{cookies_str}")
     
     bot = XianyuReplyBot()
     xianyuLive = XianyuLive(cookies_str)
