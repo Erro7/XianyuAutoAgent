@@ -1,4 +1,4 @@
-name: Run Python Script
+name: Start App
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
           # 非敏感变量直接写入
           MODEL_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
           MODEL_NAME: qwen-max
-          TOGGLE_KEYWORDS: 。
+          TOGGLE_KEYWORDS: xxx
 
         run: |
           python main.py
