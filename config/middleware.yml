@@ -1,0 +1,27 @@
+# config/middleware.yml
+message_middleware:
+  max_workers: 5
+  max_queue_size: 1000
+  retry_settings:
+    max_retries: 3
+    retry_delay: 30  # seconds
+    retry_timeout: 300  # seconds
+  
+  priorities:
+    urgent_keywords: ["紧急", "投诉", "退款", "问题"]
+    high_keywords: ["价格", "便宜", "砍价", "多少钱"]
+    
+  handlers:
+    chat:
+      enabled: true
+      timeout: 30
+    system:
+      enabled: true
+      timeout: 10
+    notification:
+      enabled: true
+      timeout: 15
+
+logging:
+  level: INFO
+  format: "{time} | {level} | {name}:{function}:{line} - {message}"
