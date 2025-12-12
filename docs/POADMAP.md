@@ -15,7 +15,10 @@
 
 ### 多模型引擎架构
 
+![图片](https://raw.githubusercontent.com/Erro7/XianyuAutoAgent/refs/heads/develop/images/mermaid_20251212_ed40f1.svg)
+
 ```mermaid
+
 flowchart TD
     A[模型调度器<br>Model Router]
     B[负载均衡器<br>Load Balancer]
@@ -34,6 +37,8 @@ flowchart TD
   ```
 
 ### 身份识别系统流程
+
+![图片](https://raw.githubusercontent.com/Erro7/XianyuAutoAgent/refs/heads/develop/images/mermaid_20251212_2b2dcb.svg)
 
 ```mermaid
 flowchart TD
@@ -81,6 +86,8 @@ flowchart TD
 ```
 
 ### 消息中间件架构
+
+![图片](https://raw.githubusercontent.com/Erro7/XianyuAutoAgent/refs/heads/develop/images/mermaid_20251212_8ae769.svg)
 
 ```mermaid
 flowchart TD
