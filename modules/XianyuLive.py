@@ -9,7 +9,7 @@ from modules.XianyuApis import XianyuApis
 from modules.XianyuAgent import XianyuReplyBot
 
 
-from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
+from utils.xianyu_utils import generate_mid, trans_cookies, generate_device_id, decrypt
 from services.context_manager import ChatContextManager
 from services.heartbeat_manager import HeartbeatManager
 
@@ -27,7 +27,7 @@ class XianyuLive:
         
         # 心跳相关配置
         self.heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # 心跳间隔，默认15秒
-        self.heartbeat_timeout = int(os.getenv("HEARTBEAT_TIMEOUT", "5"))     # 心跳超时，默认5秒
+        self.heartbeat_timeout = int(os.getenv("HEARTBEAT_TIMEOUT", "300"))     # 心跳超时，默认5秒
         self.heartbeat_task = None
         self.ws = None
         
@@ -106,50 +106,8 @@ class XianyuLive:
                 await asyncio.sleep(60)
 
     async def send_msg(self, ws, cid, toid, text):
-        text = {
-            "contentType": 1,
-            "text": {
-                "text": text
-            }
-        }
-        text_base64 = str(base64.b64encode(json.dumps(text).encode('utf-8')), 'utf-8')
-        msg = {
-            "lwp": "/r/MessageSend/sendByReceiverScope",
-            "headers": {
-                "mid": generate_mid()
-            },
-            "body": [
-                {
-                    "uuid": generate_uuid(),
-                    "cid": f"{cid}@goofish",
-                    "conversationType": 1,
-                    "content": {
-                        "contentType": 101,
-                        "custom": {
-                            "type": 1,
-                            "data": text_base64
-                        }
-                    },
-                    "redPointPolicy": 0,
-                    "extension": {
-                        "extJson": "{}"
-                    },
-                    "ctx": {
-                        "appVersion": "1.0",
-                        "platform": "web"
-                    },
-                    "mtags": {},
-                    "msgReadStatusSetting": 1
-                },
-                {
-                    "actualReceivers": [
-                        f"{toid}@goofish",
-                        f"{self.myid}@goofish"
-                    ]
-                }
-            ]
-        }
-        await ws.send(json.dumps(msg))
+        """发送消息"""
+        await self.xianyu.send_msg(ws, cid, toid, self.myid, text)
 
     async def init(self, ws):
         # 如果没有token或者token过期，获取新token

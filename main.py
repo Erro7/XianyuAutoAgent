@@ -4,7 +4,6 @@ import sys
 from loguru import logger
 from dotenv import load_dotenv
 
-from modules.XianyuAgent import XianyuReplyBot
 from modules.XianyuLive import XianyuLive
 
 def run():
