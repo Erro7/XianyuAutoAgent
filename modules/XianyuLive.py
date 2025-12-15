@@ -11,6 +11,7 @@ from modules.XianyuAgent import XianyuReplyBot
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
 from services.context_manager import ChatContextManager
+from services.heartbeat_manager import HeartbeatManager
 
 class XianyuLive:
     def __init__(self, cookies_str):
@@ -27,9 +28,10 @@ class XianyuLive:
         # 心跳相关配置
         self.heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # 心跳间隔，默认15秒
         self.heartbeat_timeout = int(os.getenv("HEARTBEAT_TIMEOUT", "5"))     # 心跳超时，默认5秒
-        self.last_heartbeat_time = 0
-        self.last_heartbeat_response = 0
         self.heartbeat_task = None
+        self.ws = None
+        
+        self.heartbeat_manager = None
         self.ws = None
         
         # Token刷新相关配置
@@ -181,6 +183,33 @@ class XianyuLive:
              "pts": int(time.time() * 1000) * 1000, "seq": 0, "timestamp": int(time.time() * 1000)}]}
         await ws.send(json.dumps(msg))
         logger.info('连接注册完成')
+
+    async def init_heartbeat_manager(self, websocket):
+        """初始化心跳管理器"""
+        
+        self.heartbeat_manager = HeartbeatManager(
+            websocket=websocket,
+            heartbeat_interval=self.heartbeat_interval,
+            heartbeat_timeout=self.heartbeat_timeout
+        )
+        
+        # 设置连接丢失回调
+        self.heartbeat_manager.set_connection_lost_callback(self._on_connection_lost)
+        
+        await self.heartbeat_manager.start()
+        logger.info("心跳管理器初始化完成")
+
+    async def _on_connection_lost(self):
+        """连接丢失回调"""
+        logger.warning("心跳管理器检测到连接丢失，准备重连...")
+        self.connection_restart_flag = True
+        
+        # 关闭当前WebSocket连接，触发重连
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception as e:
+                logger.error(f"关闭WebSocket连接失败: {e}")
 
     def is_chat_message(self, message):
         """判断是否为用户聊天消息"""
@@ -450,61 +479,6 @@ class XianyuLive:
             logger.error(f"处理消息时发生错误: {str(e)}")
             logger.debug(f"原始消息: {message_data}")
 
-    async def send_heartbeat(self, ws):
-        """发送心跳包并等待响应"""
-        try:
-            heartbeat_mid = generate_mid()
-            heartbeat_msg = {
-                "lwp": "/!",
-                "headers": {
-                    "mid": heartbeat_mid
-                }
-            }
-            await ws.send(json.dumps(heartbeat_msg))
-            self.last_heartbeat_time = time.time()
-            logger.debug("心跳包已发送")
-            return heartbeat_mid
-        except Exception as e:
-            logger.error(f"发送心跳包失败: {e}")
-            raise
-
-    async def heartbeat_loop(self, ws):
-        """心跳维护循环"""
-        while True:
-            try:
-                current_time = time.time()
-                
-                # 检查是否需要发送心跳
-                if current_time - self.last_heartbeat_time >= self.heartbeat_interval:
-                    await self.send_heartbeat(ws)
-                
-                # 检查上次心跳响应时间，如果超时则认为连接已断开
-                if (current_time - self.last_heartbeat_response) > (self.heartbeat_interval + self.heartbeat_timeout):
-                    logger.warning("心跳响应超时，可能连接已断开")
-                    break
-                
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.error(f"心跳循环出错: {e}")
-                break
-
-    async def handle_heartbeat_response(self, message_data):
-        """处理心跳响应"""
-        try:
-            if (
-                isinstance(message_data, dict)
-                and "headers" in message_data
-                and "mid" in message_data["headers"]
-                and "code" in message_data
-                and message_data["code"] == 200
-            ):
-                self.last_heartbeat_response = time.time()
-                logger.debug("收到心跳响应")
-                return True
-        except Exception as e:
-            logger.error(f"处理心跳响应出错: {e}")
-        return False
-
     async def main(self):
         while True:
             try:
@@ -527,12 +501,8 @@ class XianyuLive:
                     self.ws = websocket
                     await self.init(websocket)
                     
-                    # 初始化心跳时间
-                    self.last_heartbeat_time = time.time()
-                    self.last_heartbeat_response = time.time()
-                    
-                    # 启动心跳任务
-                    self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
+                    # 初始化心跳
+                    await self.init_heartbeat_manager(websocket)
                     
                     # 启动token刷新任务
                     self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
@@ -546,8 +516,8 @@ class XianyuLive:
                                 
                             message_data = json.loads(message)
                             
-                            # 处理心跳响应
-                            if await self.handle_heartbeat_response(message_data):
+                              # 优先处理心跳响应
+                            if self.heartbeat_manager and self.heartbeat_manager.handle_heartbeat_response(message_data):
                                 continue
                             
                             # 发送通用ACK响应
@@ -581,14 +551,12 @@ class XianyuLive:
                 logger.error(f"连接发生错误: {e}")
                 
             finally:
-                # 清理任务
-                if self.heartbeat_task:
-                    self.heartbeat_task.cancel()
-                    try:
-                        await self.heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
+                # 停止心跳管理器
+                if self.heartbeat_manager:
+                    await self.heartbeat_manager.stop()
+                    self.heartbeat_manager = None
                         
+                # 清理任务
                 if self.token_refresh_task:
                     self.token_refresh_task.cancel()
                     try:
