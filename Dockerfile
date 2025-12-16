@@ -60,6 +60,7 @@ COPY prompts/default_prompt_example.txt prompts/default_prompt.txt
 COPY main.py ./
 COPY modules/ modules/
 COPY services/ services/
+COPY middleware/ middleware/
 COPY utils/ utils/
 
 # 容器启动时运行的命令
