@@ -401,14 +401,13 @@ class XianyuLive:
             }
 
             # 发送到消息中间件
-            self.message_manager.send_message(
+            await self.message_manager.send_message(
                 chat_id=message_info["chat_id"],
                 payload=payload,
                 message_type=message_type,
                 correlation_id=message_info.get("message_id")
             )
-
-                
+            
         except Exception as e:
             logger.error(f"处理消息时发生错误: {str(e)}")
             
@@ -504,7 +503,7 @@ class XianyuLive:
                                 
                             message_data = json.loads(message)
                             
-                              # 优先处理心跳响应
+                            # 优先处理心跳响应
                             if self.heartbeat_manager and self.heartbeat_manager.handle_heartbeat_response(message_data):
                                 continue
                             
