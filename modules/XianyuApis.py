@@ -2,10 +2,14 @@ import time
 import os
 import re
 import sys
+import json
+import base64
 
 import requests
+import websockets
 from loguru import logger
-from utils.xianyu_utils import generate_sign
+
+from utils.xianyu_utils import generate_sign, generate_mid, generate_uuid
 
 
 class XianyuApis:
@@ -264,3 +268,58 @@ class XianyuApis:
             logger.error(f"商品信息API请求异常: {str(e)}")
             time.sleep(0.5)
             return self.get_item_info(item_id, retry_count + 1)
+        
+    async def send_msg(self, ws: websockets.WebSocketClientProtocol, cid, toid, myid, text):
+        """发送消息到WebSocket连接
+        
+        Args:
+            ws: WebSocket连接对象
+            cid: 会话ID
+            toid: 接收者ID
+            myid: 发送者ID
+            text: 消息文本内容
+        """
+        text_content = {
+            "contentType": 1,
+            "text": {
+                "text": text
+            }
+        }
+        text_base64 = str(base64.b64encode(json.dumps(text_content).encode('utf-8')), 'utf-8')
+        msg = {
+            "lwp": "/r/MessageSend/sendByReceiverScope",
+            "headers": {
+                "mid": generate_mid()
+            },
+            "body": [
+                {
+                    "uuid": generate_uuid(),
+                    "cid": f"{cid}@goofish",
+                    "conversationType": 1,
+                    "content": {
+                        "contentType": 101,
+                        "custom": {
+                            "type": 1,
+                            "data": text_base64
+                        }
+                    },
+                    "redPointPolicy": 0,
+                    "extension": {
+                        "extJson": "{}"
+                    },
+                    "ctx": {
+                        "appVersion": "1.0",
+                        "platform": "web"
+                    },
+                    "mtags": {},
+                    "msgReadStatusSetting": 1
+                },
+                {
+                    "actualReceivers": [
+                        f"{toid}@goofish",
+                        f"{myid}@goofish"
+                    ]
+                }
+            ]
+        }
+        await ws.send(json.dumps(msg))
