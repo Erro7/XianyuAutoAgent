@@ -1,67 +1,55 @@
-# middleware/message_middleware.py
 import asyncio
-import json
-import time
+from typing import Dict, List, Callable, Any, Optional
+from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import Dict, List, Optional, Callable, Any
-from dataclasses import dataclass, field
-from loguru import logger
+from datetime import datetime
+import logging
 from abc import ABC, abstractmethod
 
-class MessagePriority(Enum):
-    """消息优先级枚举"""
-    LOW = 1
-    NORMAL = 2
-    HIGH = 3
-    URGENT = 4
-
-class MessageStatus(Enum):
-    """消息状态枚举"""
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    RETRY = "retry"
+# 消息类型
+class MessageType(Enum):
+    EVENT = "event"
+    COMMAND = "command"
+    QUERY = "query"
 
 @dataclass
 class Message:
-    """消息数据结构"""
     id: str
-    chat_id: str
-    user_id: str
-    item_id: str
-    content: str
-    message_type: str = "text"
-    priority: MessagePriority = MessagePriority.NORMAL
-    status: MessageStatus = MessageStatus.PENDING
-    timestamp: float = field(default_factory=time.time)
-    retry_count: int = 0
-    max_retries: int = 3
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    type: MessageType
+    payload: Dict[str, Any]
+    chat_id: str  # 新增：会话ID
+    timestamp: datetime = None
+    correlation_id: str = None
+    
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.utcnow()
     
     def to_dict(self) -> Dict:
         """转换为字典格式"""
         return {
             'id': self.id,
+            'type': self.type.value,
+            'payload': self.payload,
             'chat_id': self.chat_id,
-            'user_id': self.user_id,
-            'item_id': self.item_id,
-            'content': self.content,
-            'message_type': self.message_type,
-            'priority': self.priority.value,
-            'status': self.status.value,
-            'timestamp': self.timestamp,
-            'retry_count': self.retry_count,
-            'max_retries': self.max_retries,
-            'metadata': self.metadata
+            'timestamp': self.timestamp.isoformat(),
+            'correlation_id': self.correlation_id
         }
 
-class MessageHandler(ABC):
+class BaseMiddleware(ABC):
+    """中间件抽象基类"""
+    
+    @abstractmethod
+    async def __call__(self, message: Message, next_handler: Callable) -> Any:
+        """中间件处理方法"""
+        pass
+
+class BaseMessageHandler(ABC):
     """消息处理器抽象基类"""
     
     @abstractmethod
-    async def handle(self, message: Message) -> bool:
-        """处理消息，返回是否成功"""
+    async def handle(self, message: Message) -> Any:
+        """处理消息"""
         pass
     
     @abstractmethod
@@ -69,232 +57,195 @@ class MessageHandler(ABC):
         """判断是否能处理该消息"""
         pass
 
-class MessageQueue:
-    """消息队列实现"""
+class ChatQueue:
+    """单个会话的消息队列"""
     
-    def __init__(self, max_size: int = 1000):
-        self.max_size = max_size
-        self._queues = {
-            MessagePriority.URGENT: asyncio.Queue(maxsize=max_size),
-            MessagePriority.HIGH: asyncio.Queue(maxsize=max_size),
-            MessagePriority.NORMAL: asyncio.Queue(maxsize=max_size),
-            MessagePriority.LOW: asyncio.Queue(maxsize=max_size)
-        }
-        self._stats = {
-            'total_messages': 0,
-            'processed_messages': 0,
-            'failed_messages': 0,
-            'queue_sizes': {}
-        }
+    def __init__(self, chat_id: str, max_size: int = 100):
+        self.chat_id = chat_id
+        self.queue = asyncio.Queue(maxsize=max_size)
+        self.processing = False
+        self.last_activity = datetime.utcnow()
     
     async def put(self, message: Message) -> bool:
         """添加消息到队列"""
         try:
-            queue = self._queues[message.priority]
-            if queue.full():
-                logger.warning(f"队列已满，丢弃消息: {message.id}")
+            if self.queue.full():
                 return False
-            
-            await queue.put(message)
-            self._stats['total_messages'] += 1
-            logger.debug(f"消息已入队: {message.id}, 优先级: {message.priority.name}")
+            await self.queue.put(message)
+            self.last_activity = datetime.utcnow()
             return True
-        except Exception as e:
-            logger.error(f"消息入队失败: {e}")
+        except Exception:
             return False
     
     async def get(self) -> Optional[Message]:
-        """按优先级获取消息"""
-        # 按优先级顺序检查队列
-        for priority in [MessagePriority.URGENT, MessagePriority.HIGH, 
-                        MessagePriority.NORMAL, MessagePriority.LOW]:
-            queue = self._queues[priority]
-            if not queue.empty():
-                try:
-                    message = await asyncio.wait_for(queue.get(), timeout=0.1)
-                    return message
-                except asyncio.TimeoutError:
-                    continue
-        return None
+        """获取消息"""
+        try:
+            message = await asyncio.wait_for(self.queue.get(), timeout=0.1)
+            return message
+        except asyncio.TimeoutError:
+            return None
     
-    def get_stats(self) -> Dict:
-        """获取队列统计信息"""
-        self._stats['queue_sizes'] = {
-            priority.name: queue.qsize() 
-            for priority, queue in self._queues.items()
-        }
-        return self._stats.copy()
+    def is_empty(self) -> bool:
+        return self.queue.empty()
+    
+    def size(self) -> int:
+        return self.queue.qsize()
 
-class MessageMiddleware:
-    """消息中间件核心类"""
+class MultiChatQueueManager:
+    """多会话队列管理器"""
     
-    def __init__(self, max_workers: int = 5, max_queue_size: int = 1000):
-        self.max_workers = max_workers
-        self.message_queue = MessageQueue(max_queue_size)
-        self.handlers: List[MessageHandler] = []
-        self.workers: List[asyncio.Task] = []
-        self.is_running = False
-        self.retry_queue = asyncio.Queue()
-        
-        # 统计信息
-        self.stats = {
-            'start_time': None,
-            'processed_count': 0,
-            'failed_count': 0,
-            'retry_count': 0
-        }
+    def __init__(self, max_chat_queues: int = 1000, queue_max_size: int = 100):
+        self.chat_queues: Dict[str, ChatQueue] = {}
+        self.max_chat_queues = max_chat_queues
+        self.queue_max_size = queue_max_size
+        self._lock = asyncio.Lock()
     
-    def register_handler(self, handler: MessageHandler):
-        """注册消息处理器"""
-        self.handlers.append(handler)
-        logger.info(f"已注册消息处理器: {handler.__class__.__name__}")
+    async def get_or_create_queue(self, chat_id: str) -> ChatQueue:
+        """获取或创建会话队列"""
+        async with self._lock:
+            if chat_id not in self.chat_queues:
+                # 如果队列数量超限，清理最旧的队列
+                if len(self.chat_queues) >= self.max_chat_queues:
+                    await self._cleanup_old_queues()
+                
+                self.chat_queues[chat_id] = ChatQueue(chat_id, self.queue_max_size)
+            
+            return self.chat_queues[chat_id]
     
-    async def send_message(self, message: Message) -> bool:
-        """发送消息到队列"""
-        return await self.message_queue.put(message)
+    async def put_message(self, message: Message) -> bool:
+        """添加消息到对应会话队列"""
+        queue = await self.get_or_create_queue(message.chat_id)
+        return await queue.put(message)
     
-    async def start(self):
-        """启动消息中间件"""
-        if self.is_running:
-            logger.warning("消息中间件已在运行中")
-            return
-        
-        self.is_running = True
-        self.stats['start_time'] = time.time()
-        
-        # 启动工作线程
-        for i in range(self.max_workers):
-            worker = asyncio.create_task(self._worker(f"worker-{i}"))
-            self.workers.append(worker)
-        
-        # 启动重试处理器
-        retry_worker = asyncio.create_task(self._retry_worker())
-        self.workers.append(retry_worker)
-        
-        logger.info(f"消息中间件已启动，工作线程数: {self.max_workers}")
-    
-    async def stop(self):
-        """停止消息中间件"""
-        if not self.is_running:
-            return
-        
-        self.is_running = False
-        
-        # 取消所有工作任务
-        for worker in self.workers:
-            worker.cancel()
-        
-        # 等待所有任务完成
-        await asyncio.gather(*self.workers, return_exceptions=True)
-        self.workers.clear()
-        
-        logger.info("消息中间件已停止")
-    
-    async def _worker(self, worker_name: str):
-        """工作线程处理消息"""
-        logger.info(f"工作线程 {worker_name} 已启动")
-        
-        while self.is_running:
-            try:
-                # 获取消息
-                message = await self.message_queue.get()
-                if not message:
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                # 更新消息状态
-                message.status = MessageStatus.PROCESSING
-                logger.debug(f"[{worker_name}] 开始处理消息: {message.id}")
-                
-                # 查找合适的处理器
-                handler = self._find_handler(message)
-                if not handler:
-                    logger.error(f"未找到合适的处理器: {message.id}")
-                    message.status = MessageStatus.FAILED
-                    self.stats['failed_count'] += 1
-                    continue
-                
-                # 处理消息
-                success = await handler.handle(message)
-                
-                if success:
-                    message.status = MessageStatus.COMPLETED
-                    self.stats['processed_count'] += 1
-                    logger.debug(f"[{worker_name}] 消息处理成功: {message.id}")
-                else:
-                    # 处理失败，考虑重试
-                    await self._handle_failed_message(message)
-                
-            except asyncio.CancelledError:
-                logger.info(f"工作线程 {worker_name} 被取消")
-                break
-            except Exception as e:
-                logger.error(f"工作线程 {worker_name} 处理消息时出错: {e}")
-                await asyncio.sleep(1)
-    
-    async def _retry_worker(self):
-        """重试处理器"""
-        logger.info("重试处理器已启动")
-        
-        while self.is_running:
-            try:
-                # 每30秒检查一次重试队列
-                await asyncio.sleep(30)
-                
-                retry_messages = []
-                while not self.retry_queue.empty():
-                    try:
-                        message = self.retry_queue.get_nowait()
-                        retry_messages.append(message)
-                    except asyncio.QueueEmpty:
-                        break
-                
-                for message in retry_messages:
-                    if time.time() - message.timestamp > 300:  # 5分钟后重试
-                        message.retry_count += 1
-                        message.status = MessageStatus.RETRY
-                        
-                        if message.retry_count <= message.max_retries:
-                            await self.message_queue.put(message)
-                            self.stats['retry_count'] += 1
-                            logger.info(f"消息重试: {message.id}, 第{message.retry_count}次")
-                        else:
-                            message.status = MessageStatus.FAILED
-                            self.stats['failed_count'] += 1
-                            logger.error(f"消息重试次数超限，标记为失败: {message.id}")
-                
-            except asyncio.CancelledError:
-                logger.info("重试处理器被取消")
-                break
-            except Exception as e:
-                logger.error(f"重试处理器出错: {e}")
-    
-    def _find_handler(self, message: Message) -> Optional[MessageHandler]:
-        """查找合适的消息处理器"""
-        for handler in self.handlers:
-            if handler.can_handle(message):
-                return handler
+    async def get_next_message(self) -> Optional[Message]:
+        """轮询获取下一个消息"""
+        for chat_queue in list(self.chat_queues.values()):
+            if not chat_queue.is_empty():
+                message = await chat_queue.get()
+                if message:
+                    return message
         return None
     
-    async def _handle_failed_message(self, message: Message):
-        """处理失败的消息"""
-        message.status = MessageStatus.FAILED
+    async def _cleanup_old_queues(self):
+        """清理旧的空队列"""
+        current_time = datetime.utcnow()
+        to_remove = []
         
-        if message.retry_count < message.max_retries:
-            # 加入重试队列
-            await self.retry_queue.put(message)
-            logger.warning(f"消息处理失败，加入重试队列: {message.id}")
-        else:
-            # 超过重试次数，标记为最终失败
-            self.stats['failed_count'] += 1
-            logger.error(f"消息处理最终失败: {message.id}")
+        for chat_id, queue in self.chat_queues.items():
+            # 清理5分钟内无活动且为空的队列
+            if (queue.is_empty() and 
+                (current_time - queue.last_activity).total_seconds() > 300):
+                to_remove.append(chat_id)
+        
+        for chat_id in to_remove:
+            del self.chat_queues[chat_id]
     
     def get_stats(self) -> Dict:
         """获取统计信息"""
-        current_stats = self.stats.copy()
-        current_stats.update(self.message_queue.get_stats())
+        return {
+            'total_queues': len(self.chat_queues),
+            'queue_sizes': {chat_id: queue.size() for chat_id, queue in self.chat_queues.items()},
+            'total_messages': sum(queue.size() for queue in self.chat_queues.values())
+        }
+
+class MessageProcessor:
+    """消息处理器"""
+    
+    def __init__(self):
+        self.handlers: Dict[MessageType, List[BaseMessageHandler]] = {}
+        self.middlewares: List[BaseMiddleware] = []
+        self.logger = logging.getLogger(__name__)
+    
+    def use_middleware(self, middleware: BaseMiddleware):
+        """添加中间件"""
+        self.middlewares.append(middleware)
+        self.logger.info(f"已注册中间件: {middleware.__class__.__name__}")
+    
+    def register_handler(self, msg_type: MessageType, handler: BaseMessageHandler):
+        """注册消息处理器"""
+        if msg_type not in self.handlers:
+            self.handlers[msg_type] = []
+        self.handlers[msg_type].append(handler)
+        self.logger.info(f"已注册处理器: {handler.__class__.__name__} for {msg_type.value}")
+    
+    async def process(self, message: Message):
+        """处理消息"""
+        async def chain(msg, idx=0):
+            if idx >= len(self.middlewares):
+                # 执行实际处理器
+                handlers = self.handlers.get(msg.type, [])
+                results = []
+                for handler in handlers:
+                    try:
+                        if handler.can_handle(msg):
+                            result = await handler.handle(msg)
+                            results.append(result)
+                    except Exception as e:
+                        self.logger.error(f"Handler error: {e}")
+                return results
+            
+            middleware = self.middlewares[idx]
+            return await middleware(msg, lambda m: chain(m, idx + 1))
         
-        if current_stats['start_time']:
-            current_stats['uptime'] = time.time() - current_stats['start_time']
+        return await chain(message)
+
+# 中间件实现示例
+class LoggingMiddleware(BaseMiddleware):
+    """日志中间件"""
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+    
+    async def __call__(self, message: Message, next_handler: Callable) -> Any:
+        self.logger.info(f"Processing message: {message.id} in chat: {message.chat_id}")
+        start_time = datetime.utcnow()
         
-        return current_stats
+        try:
+            result = await next_handler(message)
+            duration = (datetime.utcnow() - start_time).total_seconds()
+            self.logger.info(f"Message processed: {message.id}, duration: {duration:.3f}s")
+            return result
+        except Exception as e:
+            self.logger.error(f"Message processing failed: {message.id}, error: {e}")
+            raise
+
+class ValidationMiddleware(BaseMiddleware):
+    """验证中间件"""
+    
+    async def __call__(self, message: Message, next_handler: Callable) -> Any:
+        if not message.payload:
+            raise ValueError("Payload is empty")
+        
+        if not message.chat_id:
+            raise ValueError("Chat ID is required")
+        
+        return await next_handler(message)
+
+class RateLimitMiddleware(BaseMiddleware):
+    """限流中间件"""
+    
+    def __init__(self, max_requests_per_minute: int = 60):
+        self.max_requests = max_requests_per_minute
+        self.request_counts: Dict[str, List[datetime]] = {}
+    
+    async def __call__(self, message: Message, next_handler: Callable) -> Any:
+        current_time = datetime.utcnow()
+        chat_id = message.chat_id
+        
+        # 清理过期记录
+        if chat_id in self.request_counts:
+            self.request_counts[chat_id] = [
+                req_time for req_time in self.request_counts[chat_id]
+                if (current_time - req_time).total_seconds() < 60
+            ]
+        else:
+            self.request_counts[chat_id] = []
+        
+        # 检查限流
+        if len(self.request_counts[chat_id]) >= self.max_requests:
+            raise Exception(f"Rate limit exceeded for chat {chat_id}")
+        
+        # 记录请求
+        self.request_counts[chat_id].append(current_time)
+        
+        return await next_handler(message)
