@@ -57,7 +57,7 @@ COPY prompts/tech_prompt_example.txt prompts/tech_prompt.txt
 COPY prompts/default_prompt_example.txt prompts/default_prompt.txt
 
 # 只复制绝对必要的文件
-COPY main.py ./
+COPY main.py base.py ./
 COPY modules/ modules/
 COPY services/ services/
 COPY middleware/ middleware/

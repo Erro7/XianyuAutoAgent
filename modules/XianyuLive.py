@@ -1,23 +1,27 @@
-import base64
 import json
 import asyncio
 import time
 import os
 import websockets
+from typing import Any
 from loguru import logger
+from base import BaseLive
+
 from modules.XianyuApis import XianyuApis
 from modules.XianyuAgent import XianyuReplyBot
 
 
-from utils.xianyu_utils import generate_mid, trans_cookies, generate_device_id, decrypt
+from utils.xianyu_utils import generate_mid, trans_cookies, generate_device_id
+from utils.message_utils import XianyuMessageUtils
 from services.context_manager import ChatContextManager
 from services.heartbeat_manager import HeartbeatManager
 from services.message_manager import MessageManager, BaseMessageHandler
 from middleware.message_middleware import MessageType, BaseMiddleware
 
 
-class XianyuLive:
+class XianyuLive(BaseLive):
     def __init__(self, cookies_str):
+        super().__init__()
         self.xianyu = XianyuApis()
         self.bot = XianyuReplyBot()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
@@ -59,6 +63,9 @@ class XianyuLive:
         
         # 人工接管关键词，从环境变量读取
         self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
+        
+        # 消息工具类
+        self.message_utils = XianyuMessageUtils()
         
     async def send_msg(self, ws, cid, toid, text):
         """发送消息"""
@@ -355,53 +362,64 @@ class XianyuLive:
             self.enter_manual_mode(chat_id)
             return "manual"
 
-    async def handle_message(self, message_data, websocket):
-        """处理所有类型的消息 - 使用消息中间件"""
+    async def on_receive(self, raw_message: Any) -> bool:
+        """
+        实现 BaseLive 的消息接收接口
+        Live onReceive -> Manager onReceive -> Manager 中间件 -> Manager 路由中间件 -> 分派 Handler
+        """
         try:
+            # 解析 JSON
+            if isinstance(raw_message, str):
+                message_data = json.loads(raw_message)
+            else:
+                message_data = raw_message
+            
             # 发送ACK响应
-            await self._send_ack(message_data, websocket)
+            await self.message_utils.send_ack(message_data, self.ws)
 
             # 如果不是同步包消息，直接返回
-            if not self.is_sync_package(message_data):
-                return
+            if not self.message_utils.is_sync_package(message_data):
+                return True
 
             # 获取并解密数据
-            message = await self._decrypt_sync_data(message_data)
+            message = await self.message_utils.decrypt_sync_data(message_data)
             if not message:
-                return
+                return True
             
             # 检查订单消息
-            if await self._handle_order_message(message):
-                return
+            if await self.message_utils.handle_order_message(message):
+                return True
 
             # 检查输入状态消息
-            if self.is_typing_status(message):
+            if self.message_utils.is_typing_status(message):
                 logger.debug("用户正在输入")
-                return
+                return True
 
             # 检查是否为聊天消息
-            if not self.is_chat_message(message):
-                logger.debug(f"其他非聊天消息")
-                return
+            if not self.message_utils.is_chat_message(message):
+                logger.debug("其他非聊天消息")
+                return True
 
             # 提取消息信息
-            message_info = self._extract_message_info(message)
+            message_info = self.message_utils.extract_message_info(message)
             if not message_info:
-                return
+                return True
 
             # 判断消息类型
-            message_type = self._determine_message_type(message_info)
+            message_type = self.message_utils.determine_message_type(
+                message_info, self.myid, self.toggle_keywords
+            )
             
             # 构建消息载荷
             payload = {
                 "original_message": message,
-                "websocket": websocket,
+                "websocket": self.ws,
                 "message_info": message_info,
                 "xianyu_live": self
             }
 
-            # 发送到消息中间件
-            await self.message_manager.send_message(
+            # 发送到消息管理器
+            return await self.message_manager.send_message(
                 chat_id=message_info["chat_id"],
                 payload=payload,
                 message_type=message_type,
@@ -409,146 +427,153 @@ class XianyuLive:
             )
             
         except Exception as e:
-            logger.error(f"处理消息时发生错误: {str(e)}")
-            
-    async def _send_ack(self, message_data, websocket):
-        """发送ACK响应"""
-        try:
-            if "headers" in message_data and isinstance(message_data, dict) and "mid" in message_data["headers"]:
-                ack = {
-                    "code": 200,
-                    "headers": {
-                        "mid": message_data["headers"].get('mid', generate_mid()),
-                        "sid": message_data["headers"].get("sid", "")
-                    }
-                }
-                # 复制其他可能的header字段
-                for key in ["app-key", "ua", "dt"]:
-                    if key in message_data["headers"]:
-                        ack["headers"][key] = message_data["headers"][key]
-                await websocket.send(json.dumps(ack))
-        except Exception as e:
-            logger.debug(f"发送ACK失败: {e}")
-
-    async def _decrypt_sync_data(self, message_data):
-        """解密同步数据"""
-        try:
-            sync_data = message_data["body"]["syncPushPackage"]["data"][0]
-            
-            if "data" not in sync_data:
-                logger.debug("同步包中无data字段")
-                return None
-
-            data = sync_data["data"]
-            try:
-                # 尝试直接解码
-                data = base64.b64decode(data).decode("utf-8")
-                message = json.loads(data)
-                return message
-            except Exception:
-                # 需要解密
-                try:
-                    decrypted_data = decrypt(data)
-                    message = json.loads(decrypted_data)
-                    return message
-                except Exception as e:
-                    logger.error(f"消息解密失败: {e}")
-                    return None
-        except Exception as e:
-            logger.error(f"解密同步数据失败: {e}")
-            return None
+            self.logger.error(f"消息接收失败: {str(e)}")
+            return False
     
-    async def _messsage_proccess(self):   
-        # 注册消息处理器
-        self._setup_message_handlers()
-        # 注册自定义中间件
-        self._setup_custom_middlewares()
-        # 启动消息管理器
-        await self.message_manager.start()
+    async def send_message(self, target: str, content: str, **kwargs) -> bool:
+        """实现发送消息接口"""
+        try:
+            websocket = kwargs.get('websocket', self.ws)
+            await self.xianyu.send_msg(websocket, target, kwargs.get('to_user'), self.myid, content)
+            return True
+        except Exception as e:
+            self.logger.error(f"发送消息失败: {e}")
+            return False
+    
+    async def connect(self) -> bool:
+        """建立 WebSocket 连接"""
+        try:
+            # 如果没有token或者token过期，获取新token
+            if not self.current_token or (time.time() - self.last_token_refresh_time) >= self.token_refresh_interval:
+                logger.info("获取初始token...")
+                await self.refresh_token()
+            
+            if not self.current_token:
+                logger.error("无法获取有效token，连接失败")
+                return False
+            
+            headers = {
+                "Cookie": self.cookies_str,
+                "Host": "wss-goofish.dingtalk.com",
+                "Connection": "Upgrade",
+                "Pragma": "no-cache",
+                "Cache-Control": "no-cache",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                "Origin": "https://www.goofish.com",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            }
 
-    async def _live_proccess(self):
-         while True:
+            self.ws = await websockets.connect(self.base_url, extra_headers=headers)
+            await self.init(self.ws)
+            await self.init_heartbeat_manager(self.ws)
+            
+            logger.info("WebSocket连接建立成功")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"连接失败: {e}")
+            return False
+    
+    async def disconnect(self) -> bool:
+        """断开连接"""
+        try:
+            # 停止心跳管理器
+            if self.heartbeat_manager:
+                await self.heartbeat_manager.stop()
+                self.heartbeat_manager = None
+                        
+            # 清理任务
+            if self.token_refresh_task:
+                self.token_refresh_task.cancel()
+                try:
+                    await self.token_refresh_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # 关闭WebSocket连接
+            if self.ws:
+                await self.ws.close()
+                self.ws = None
+            
+            logger.info("WebSocket连接已断开")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"断开连接失败: {e}")
+            return False
+    
+    async def _run_loop(self):
+        """运行主循环 - 只负责接收消息"""
+        while self.is_running:
             try:
                 # 重置连接重启标志
                 self.connection_restart_flag = False
                 
-                headers = {
-                    "Cookie": self.cookies_str,
-                    "Host": "wss-goofish.dingtalk.com",
-                    "Connection": "Upgrade",
-                    "Pragma": "no-cache",
-                    "Cache-Control": "no-cache",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-                    "Origin": "https://www.goofish.com",
-                    "Accept-Encoding": "gzip, deflate, br, zstd",
-                    "Accept-Language": "zh-CN,zh;q=0.9",
-                }
-
-                async with websockets.connect(self.base_url, extra_headers=headers) as websocket:
-                    self.ws = websocket
-                    await self.init(websocket)
+                # 启动消息管理器
+                await self.message_manager.start()
+                
+                # 启动token刷新任务
+                self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
+                
+                # 消息接收循环
+                async for raw_message in self.ws:
+                    if not self.is_running:
+                        break
                     
-                    # 初始化心跳
-                    await self.init_heartbeat_manager(websocket)
-                               
-                    # 启动token刷新任务
-                    self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
+                    # 检查是否需要重启连接
+                    if self.connection_restart_flag:
+                        logger.info("检测到连接重启标志，准备重新建立连接...")
+                        break
                     
-                    async for message in websocket:
+                    # 优先处理心跳响应
+                    if self.heartbeat_manager:
                         try:
-                            # 检查是否需要重启连接
-                            if self.connection_restart_flag:
-                                logger.info("检测到连接重启标志，准备重新建立连接...")
-                                break
-                                
-                            message_data = json.loads(message)
-                            
-                            # 优先处理心跳响应
-                            if self.heartbeat_manager and self.heartbeat_manager.handle_heartbeat_response(message_data):
+                            message_data = json.loads(raw_message)
+                            if self.heartbeat_manager.handle_heartbeat_response(message_data):
                                 continue
-                            
-                            # 处理消息
-                            await self.handle_message(message_data, websocket)
-                                
                         except json.JSONDecodeError:
-                            logger.error("消息解析失败")
-                        except Exception as e:
-                            logger.error(f"处理消息时发生错误: {str(e)}")
-                            logger.debug(f"原始消息: {message}")
-
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket连接已关闭")
+                            pass
+                    
+                    # 将消息交给 on_receive 处理
+                    await self.on_receive(raw_message)
                 
-            except Exception as e:
-                logger.error(f"连接发生错误: {e}")
-                
-            finally:
-                # 停止心跳管理器
-                if self.heartbeat_manager:
-                    await self.heartbeat_manager.stop()
-                    self.heartbeat_manager = None
-                        
-                # 清理任务
-                if self.token_refresh_task:
-                    self.token_refresh_task.cancel()
-                    try:
-                        await self.token_refresh_task
-                    except asyncio.CancelledError:
-                        pass
+                # 清理
+                await self.message_manager.stop()
                 
                 # 如果是主动重启，立即重连；否则等待5秒
                 if self.connection_restart_flag:
                     logger.info("主动重启连接，立即重连...")
+                    if await self.connect():
+                        continue
                 else:
                     logger.info("等待5秒后重连...")
                     await asyncio.sleep(5)
-                    
+                    if await self.connect():
+                        continue
+                
+                break  # 连接失败，退出循环
+                
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("WebSocket连接已关闭")
+                await asyncio.sleep(5)
+                if not await self.connect():
+                    break
+                
+            except Exception as e:
+                logger.error(f"运行循环异常: {e}")
+                await asyncio.sleep(5)
+                if not await self.connect():
+                    break
+    
+    # 简化 main 方法
     async def main(self):
-        tasks = [
-            asyncio.create_task(self._live_proccess()),
-            asyncio.create_task(self._messsage_proccess())
-        ]
-        await asyncio.gather(*tasks)
+        # 注册消息处理器
+        self._setup_message_handlers()
+        # 注册自定义中间件
+        self._setup_custom_middlewares()
+        # 启动 Live 服务
+        await self.start()
        
 class XianyuChatHandler(BaseMessageHandler):
     """闲鱼聊天消息处理器"""
