@@ -8,7 +8,7 @@ import uuid
 import queue
 import time
 
-from middleware.message_middleware import (
+from modules.MessageProcessor import (
     MessageProcessor, Message, MessageType,
     LoggingMiddleware, ValidationMiddleware, RateLimitMiddleware,
     BaseMessageHandler

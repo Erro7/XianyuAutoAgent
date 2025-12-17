@@ -92,8 +92,6 @@ class ChatContextManager:
         conn.close()
         logger.info(f"聊天历史数据库初始化完成: {self.db_path}")
         
-
-            
     def save_item_info(self, item_id, item_data):
         """
         保存商品信息到数据库
