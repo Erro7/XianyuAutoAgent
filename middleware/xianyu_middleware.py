@@ -1,12 +1,11 @@
-
+# middleware/xianyu_middleware.py
 import time
-from typing import Any
+from typing import Optional as Opt 
 from loguru import logger
-from base import BaseLive as XianyuLive
 
 from modules.MessageProcessor import MessageType, BaseMiddleware
+from modules.XianyuManualMode import XianyuManualMode
 
-# 自定义中间件
 class MessageExpiryMiddleware(BaseMiddleware):
     """消息过期检查中间件"""
     
@@ -24,12 +23,11 @@ class MessageExpiryMiddleware(BaseMiddleware):
         
         return await next_handler(message)
 
-
 class ManualModeMiddleware(BaseMiddleware):
     """人工接管模式检查中间件"""
     
-    def __init__(self, xianyu_live: XianyuLive):
-        self.xianyu_live = xianyu_live
+    def __init__(self, manual_mode: Opt[XianyuManualMode]):
+        self.manual_mode = manual_mode
 
     async def __call__(self, message, next_handler):
         # 只对用户查询消息进行人工模式检查
@@ -37,12 +35,11 @@ class ManualModeMiddleware(BaseMiddleware):
             payload = message.payload
             message_info = payload.get("message_info")
             
-            if message_info and self.xianyu_live.is_manual_mode(message_info["chat_id"]):
+            if message_info and self.manual_mode.is_manual_mode(message_info["chat_id"]):
                 logger.info(f"🔴 会话 {message_info['chat_id']} 处于人工接管模式，跳过自动回复")
                 return {"status": "manual_mode", "chat_id": message_info["chat_id"]}
         
         return await next_handler(message)
-
 
 class DeduplicationMiddleware(BaseMiddleware):
     """消息去重中间件"""
@@ -73,4 +70,3 @@ class DeduplicationMiddleware(BaseMiddleware):
                     self.processed_messages.discard(msg)
         
         return await next_handler(message)
-    

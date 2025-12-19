@@ -2,16 +2,17 @@
 import asyncio
 import time
 import json
+import websockets
 from typing import Optional, Callable
 from loguru import logger
 from utils.xianyu_utils import generate_mid
 
 
-class HeartbeatManager:
+class XianyuHeartbeat:
     """独立的心跳管理器"""
     
-    def __init__(self, websocket, heartbeat_interval: int = 15, heartbeat_timeout: int = 5):
-        self.websocket = websocket
+    def __init__(self, websocket = None, heartbeat_interval: int = 15, heartbeat_timeout: int = 5):
+        self.websocket: Optional[websockets.WebSocketClientProtocol] = websocket
         self.heartbeat_interval = heartbeat_interval  # 心跳间隔
         self.heartbeat_timeout = heartbeat_timeout    # 心跳超时
         

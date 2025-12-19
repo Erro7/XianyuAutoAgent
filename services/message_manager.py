@@ -8,11 +8,23 @@ import uuid
 import queue
 import time
 
+from base import BaseApplication
+
 from modules.MessageProcessor import (
     MessageProcessor, Message, MessageType,
     LoggingMiddleware, ValidationMiddleware, RateLimitMiddleware,
     BaseMessageHandler
 )
+from modules.XianyuApis import XianyuApis
+from modules.XianyuAgent import XianyuReplyBot
+from modules.XianyuManualMode import XianyuManualMode
+
+from middleware.xianyu_handlers import XianyuChatHandler, XianyuCommandHandler, XianyuEventHandler
+from middleware.xianyu_middleware import MessageExpiryMiddleware, ManualModeMiddleware, DeduplicationMiddleware
+
+from services.context_manager import ChatContextManager
+
+from utils.message_utils import XianyuMessageUtils
 
 class ThreadedMessageManager:
     """线程的消息管理器"""
@@ -65,7 +77,7 @@ class ThreadedMessageManager:
         """添加自定义中间件"""
         self.message_processor.use_middleware(middleware)
     
-    def send_message(self,
+    def put_message(self,
                     chat_id: str,
                     payload: Dict[str, Any],
                     message_type: str = "query",
@@ -83,13 +95,13 @@ class ThreadedMessageManager:
                 correlation_id=correlation_id
             )
             
-            return self.put_message(message)
+            return self._put_message(message)
             
         except Exception as e:
             self.logger.debug(f"消息发送异常: {e}")
             return False
     
-    def put_message(self, message: Message) -> bool:
+    def _put_message(self, message: Message) -> bool:
         """将消息放入队列"""
         try:
             # 使用线程安全的队列
@@ -99,7 +111,7 @@ class ThreadedMessageManager:
             self.logger.debug(f"队列已满，丢弃消息: {message.chat_id}")
             return False
         except Exception as e:
-            self.logger.error(f"消息发送失败: {e}")
+            self.logger.error(f"消息处理失败: {e}")
             return False
     
     def _determine_message_type(self, message_type: str, payload: Dict[str, Any]) -> MessageType:
@@ -130,7 +142,7 @@ class ThreadedMessageManager:
             try:
                 # 从队列获取消息，设置超时避免阻塞
                 try:
-                    message = self.message_queue.get(timeout=1.0)
+                    message: Message = self.message_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
                 
@@ -205,7 +217,7 @@ class ThreadedMessageManager:
         self.worker_threads.clear()
         
         # 关闭线程池
-        self.thread_pool.shutdown(wait=True, timeout=timeout)
+        self.thread_pool.shutdown(wait=True)
         
         self.logger.info("线程消息管理器已停止")
     
@@ -245,7 +257,7 @@ class AsyncThreadedMessageManager:
         """添加自定义中间件"""
         self.threaded_manager.use_middleware(middleware)
     
-    async def send_message(self, 
+    async def put_message(self, 
                       chat_id: str,
                       payload: Dict[str, Any],
                       message_type: str = "query",
@@ -254,7 +266,7 @@ class AsyncThreadedMessageManager:
       loop = asyncio.get_event_loop()
       return await loop.run_in_executor(
           self._executor, 
-          lambda: self.threaded_manager.send_message(
+          lambda: self.threaded_manager.put_message(
               chat_id=chat_id,
               payload=payload,
               message_type=message_type,
@@ -279,4 +291,100 @@ class AsyncThreadedMessageManager:
 
 class MessageManager(AsyncThreadedMessageManager):
     """消息管理器"""
-    pass
+    
+    def __init__(self, app: BaseApplication, message_expire_time: int = 60 * 60):
+        super().__init__()
+        if app is None:
+            raise ValueError("app is required")
+        
+        self.message_expire_time = message_expire_time
+        self.app = app
+        self.api: XianyuApis = app.api
+        self.bot: XianyuReplyBot = app.bot
+        self.manual_mode = XianyuManualMode()
+        self._setup_custom_middlewares()
+        self._setup_message_handlers()
+
+    def _setup_custom_middlewares(self):
+        """设置自定义中间件"""
+        
+        # 添加消息过期检查中间件
+        self.use_middleware(MessageExpiryMiddleware(expire_time=self.message_expire_time))
+        
+        # 添加人工接管检查中间件
+        self.use_middleware(ManualModeMiddleware(manual_mode=self.manual_mode))
+        
+        # 添加消息去重中间件
+        self.use_middleware(DeduplicationMiddleware())
+        
+    def _setup_message_handlers(self):
+        """设置消息处理器"""
+        context_manager = self.app.service_manager.get_service('context_manager', ChatContextManager)
+        # 注册聊天消息处理器
+        self.register_handler(MessageType.QUERY, XianyuChatHandler(
+            context_manager=context_manager, 
+            api_service=self.api,
+            bot_service=self.bot,
+            message_expire_time=self.message_expire_time, 
+            myid=self.app.myid
+        ))
+        
+        # 注册命令处理器（如人工接管切换）
+        self.register_handler(MessageType.COMMAND, XianyuCommandHandler(
+            context_manager=context_manager,
+            manual_mode=self.manual_mode,
+            toggle_keywords=self.app.toggle_keywords,
+            myid=self.app.myid
+        ))
+        
+        # 注册事件处理器（如订单状态变更）
+        self.register_handler(MessageType.EVENT, XianyuEventHandler())
+
+    async def handle_message(self, message: dict) -> bool:
+        """处理消息"""
+        
+        # 如果不是同步包消息，直接返回
+        if not XianyuMessageUtils.is_sync_package(message):
+            return True
+
+        # 获取并解密数据
+        message = await XianyuMessageUtils.decrypt_sync_data(message)
+        if not message:
+            return True
+            
+        # 检查订单消息
+        if await XianyuMessageUtils.handle_order_message(message):
+            return True
+
+        # 检查输入状态消息
+        if XianyuMessageUtils.is_typing_status(message):
+            logger.debug("用户正在输入")
+            return True
+
+        # 检查是否为聊天消息
+        if not XianyuMessageUtils.is_chat_message(message):
+            logger.debug("其他非聊天消息")
+            return True
+
+        # 提取消息信息
+        message_info = XianyuMessageUtils.extract_message_info(message)
+        if not message_info:
+            return True
+
+        # 判断消息类型
+        message_type = XianyuMessageUtils.determine_message_type(
+            message_info, self.app.myid, self.app.toggle_keywords
+        )
+        
+        # 构建消息载荷
+        payload = {
+            "original_message": message,
+            "message_info": message_info,
+        }
+        
+        return await self.put_message(
+            chat_id=message_info['chat_id'],
+            payload=payload,
+            message_type=message_type,
+            correlation_id=message_info.get("message_id")
+        )
